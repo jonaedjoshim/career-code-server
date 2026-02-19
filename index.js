@@ -16,13 +16,11 @@ app.use(express.json());
 app.use(cookieParser());
 
 var admin = require("firebase-admin");
-
 var serviceAccount = require("./firebase-admin-key.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
-
 
 const logger = (req, res, next) => {
   console.log('inside the logger middleware')
@@ -34,6 +32,7 @@ const verifyToken = (req, res, next) => {
   if (!token) {
     return res.status(401).send({ message: 'unauthorized access' })
   }
+
   jwt.verify(token, process.env.JWT_ACCESS_SECRET, (err, decoded) => {
     if (err) {
       return res.status(401).send({ message: 'unauthorized access' })
@@ -41,23 +40,30 @@ const verifyToken = (req, res, next) => {
     req.decoded = decoded;
     next();
   })
-
 }
 
 const verifyFirebaseToken = async (req, res, next) => {
-  const authHeader = req.headers?.authorization;
-  const token = authHeader.split(' ')[1];
-  if (!token) {
+  try {
+    const authHeader = req.headers?.authorization;
+    if (!authHeader) {
+      return res.status(401).send({ message: 'unauthorized access' })
+    }
+
+    const token = authHeader.split(' ')[1];
+    if (!token) {
+      return res.status(401).send({ message: 'unauthorized access' })
+    }
+
+    const userInfo = await admin.auth().verifyIdToken(token);
+    req.tokenEmail = userInfo.email;
+    next();
+  } catch (error) {
     return res.status(401).send({ message: 'unauthorized access' })
   }
-  const userInfo = await admin.auth().verifyIdToken(token);
-  req.tokenEmail = userInfo.email;
-  next();
 }
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.mkfgrq2.mongodb.net/?appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -68,7 +74,6 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
 
     const jobsCollection = client.db('careerCode').collection('jobs');
@@ -82,24 +87,22 @@ async function run() {
 
       res.cookie('token', token, {
         httpOnly: true,
-        secure: false
+        secure: false,
+        sameSite: 'lax'
       })
 
       res.send({ success: true })
-
     })
 
     // jobs api
     app.get('/jobs', async (req, res) => {
-
       const email = req.query.email;
       const query = {};
       if (email) {
         query.hr_email = email;
       }
 
-      const cursor = jobsCollection.find(query);
-      const result = await cursor.toArray();
+      const result = await jobsCollection.find(query).toArray();
       res.send(result);
     });
 
@@ -113,6 +116,11 @@ async function run() {
 
     app.get('/jobs/applications', verifyToken, async (req, res) => {
       const email = req.query.email;
+
+      if (req.decoded.email !== email) {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+
       const query = { hr_email: email };
       const jobs = await jobsCollection.find(query).toArray();
 
@@ -123,9 +131,7 @@ async function run() {
         job.application_count = application_count;
       }
       res.send(jobs);
-
     })
-
 
     app.get('/jobs/:id', async (req, res) => {
       const id = req.params.id;
@@ -136,11 +142,9 @@ async function run() {
 
     app.post('/jobs', async (req, res) => {
       const newJob = req.body;
-      console.log(newJob);
       const result = await jobsCollection.insertOne(newJob);
       res.send(result);
     })
-
 
     // job applications related apis
     app.get('/applications', logger, verifyFirebaseToken, async (req, res) => {
@@ -150,9 +154,7 @@ async function run() {
         return res.status(403).send({ message: 'forbidden access' })
       }
 
-      const query = {
-        applicant: email
-      }
+      const query = { applicant: email }
       const result = await applicationsCollection.find(query).toArray();
 
       // bad way to aggregate data
@@ -160,9 +162,11 @@ async function run() {
         const jobId = application.jobId;
         const jobQuery = { _id: new ObjectId(jobId) }
         const job = await jobsCollection.findOne(jobQuery);
-        application.company = job.company
-        application.title = job.title
-        application.company_logo = job.company_logo
+        if (job) {
+          application.company = job.company
+          application.title = job.title
+          application.company_logo = job.company_logo
+        }
       }
 
       res.send(result);
@@ -171,7 +175,6 @@ async function run() {
     // app.get('/applications/:id', () =>{})
     app.get('/applications/job/:job_id', async (req, res) => {
       const job_id = req.params.job_id;
-      // console.log(job_id);
       const query = { jobId: job_id }
       const result = await applicationsCollection.find(query).toArray();
       res.send(result);
@@ -179,7 +182,6 @@ async function run() {
 
     app.post('/applications', async (req, res) => {
       const application = req.body;
-      console.log(application);
       const result = await applicationsCollection.insertOne(application);
       res.send(result);
     });
@@ -188,27 +190,20 @@ async function run() {
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) }
       const updatedDoc = {
-        $set: {
-          status: req.body.status
-        }
+        $set: { status: req.body.status }
       }
 
       const result = await applicationsCollection.updateOne(filter, updatedDoc)
       res.send(result);
     })
 
-
-    // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
-    // Ensures that the client will close when you finish/error
     // await client.close();
   }
 }
 run().catch(console.dir);
-
-
 
 app.get('/', (req, res) => {
   res.send('Career Code is Cooking')
